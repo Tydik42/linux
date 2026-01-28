@@ -64,6 +64,7 @@ struct sof_es8336_private {
 	struct list_head hdmi_pcm_list;
 	bool speaker_en;
 	struct delayed_work pcm_pop_work;
+	struct notifier_block jack_nb;
 };
 
 struct sof_hdmi_pcm {
@@ -120,8 +121,26 @@ static void pcm_pop_work_events(struct work_struct *work)
 	gpiod_set_value_cansleep(priv->gpio_speakers, priv->speaker_en);
 
 	if (quirk & SOF_ES8336_HEADPHONE_GPIO)
-		gpiod_set_value_cansleep(priv->gpio_headphone, priv->speaker_en);
+		gpiod_set_value_cansleep(priv->gpio_headphone, !priv->speaker_en);
 
+}
+
+static int sof_es8336_jack_notifier(struct notifier_block *nb,
+				    unsigned long action, void *data)
+{
+	struct sof_es8336_private *priv =
+		container_of(nb, struct sof_es8336_private, jack_nb);
+	struct snd_soc_jack *jack = data;
+
+	if (jack->status & SND_JACK_HEADPHONE) {
+		priv->speaker_en = false;
+		gpiod_set_value_cansleep(priv->gpio_speakers, false);
+	} else {
+		priv->speaker_en = true;
+		gpiod_set_value_cansleep(priv->gpio_speakers, true);
+	}
+
+	return NOTIFY_OK;
 }
 
 static int sof_8336_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -305,12 +324,22 @@ static int sof_es8316_init(struct snd_soc_pcm_runtime *runtime)
 
 	snd_soc_component_set_jack(codec, &priv->jack, NULL);
 
+	if (priv->gpio_speakers) {
+		priv->jack_nb.notifier_call = sof_es8336_jack_notifier;
+		snd_soc_jack_notifier_register(&priv->jack, &priv->jack_nb);
+	}
+
 	return 0;
 }
 
 static void sof_es8316_exit(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_component *component = snd_soc_rtd_to_codec(rtd, 0)->component;
+	struct snd_soc_card *card = rtd->card;
+	struct sof_es8336_private *priv = snd_soc_card_get_drvdata(card);
+
+	if (priv->gpio_speakers)
+		snd_soc_jack_notifier_unregister(&priv->jack, &priv->jack_nb);
 
 	snd_soc_component_set_jack(component, NULL, NULL);
 }
